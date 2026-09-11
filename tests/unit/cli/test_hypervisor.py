@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2024 - Canonical Ltd
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -145,3 +147,86 @@ class TestGetClientFromEnv:
         assert isinstance(kwargs["cacert"], str)
         assert "BEGIN CERTIFICATE" not in kwargs["cacert"]
         assert kwargs["cacert"] == str(cacert_file)
+
+
+class TestConfigureEncryptedStorageCommand:
+    """Tests for the configure-encrypted-storage CLI command."""
+
+    @patch("openstack_hypervisor.cli.hypervisor.Snap")
+    @patch("openstack_hypervisor.cli.hypervisor.validate_xfs_filesystem")
+    @patch("openstack_hypervisor.cli.hypervisor.write_fstab_entry")
+    @patch("openstack_hypervisor.cli.hypervisor.mount_instances_path")
+    def test_success(self, mock_mount, mock_write, mock_validate, mock_snap_class):
+        """A valid XFS mapper is recorded and mounted."""
+        snap = MagicMock()
+        snap.paths.common = Path("/var/snap/test/common")
+        mock_snap_class.return_value = snap
+        mock_validate.return_value = True
+        mock_mount.return_value = True
+
+        result = CliRunner().invoke(
+            hypervisor,
+            [
+                "configure-encrypted-storage",
+                "--mapper-path",
+                "/dev/mapper/crypt-a1b2c3d4",
+                "--luks-uuid",
+                "a1b2c3d4",
+            ],
+        )
+
+        instances_path = Path("/var/snap/test/common/lib/nova/instances")
+        assert result.exit_code == 0
+        mock_validate.assert_called_once_with(Path("/dev/mapper/crypt-a1b2c3d4"))
+        mock_write.assert_called_once_with(Path("/dev/mapper/crypt-a1b2c3d4"), instances_path)
+        mock_mount.assert_called_once_with(instances_path)
+        assert json.loads(result.output)["luks_uuid"] == "a1b2c3d4"
+
+    @patch("openstack_hypervisor.cli.hypervisor.Snap")
+    @patch("openstack_hypervisor.cli.hypervisor.validate_xfs_filesystem")
+    @patch("openstack_hypervisor.cli.hypervisor.write_fstab_entry")
+    @patch("openstack_hypervisor.cli.hypervisor.mount_instances_path")
+    def test_rejects_non_xfs(self, mock_mount, mock_write, mock_validate, mock_snap_class):
+        """A non-XFS device is rejected before any fstab change."""
+        mock_validate.return_value = False
+
+        result = CliRunner().invoke(
+            hypervisor,
+            [
+                "configure-encrypted-storage",
+                "--mapper-path",
+                "/dev/mapper/crypt-a1b2c3d4",
+                "--luks-uuid",
+                "a1b2c3d4",
+            ],
+        )
+
+        assert result.exit_code == 1
+        mock_write.assert_not_called()
+        mock_mount.assert_not_called()
+
+    @patch("openstack_hypervisor.cli.hypervisor.Snap")
+    @patch("openstack_hypervisor.cli.hypervisor.validate_xfs_filesystem")
+    @patch("openstack_hypervisor.cli.hypervisor.write_fstab_entry")
+    @patch("openstack_hypervisor.cli.hypervisor.mount_instances_path")
+    def test_rejects_mount_failure(self, mock_mount, mock_write, mock_validate, mock_snap_class):
+        """A mount failure exits non-zero."""
+        snap = MagicMock()
+        snap.paths.common = Path("/var/snap/test/common")
+        mock_snap_class.return_value = snap
+        mock_validate.return_value = True
+        mock_mount.return_value = False
+
+        result = CliRunner().invoke(
+            hypervisor,
+            [
+                "configure-encrypted-storage",
+                "--mapper-path",
+                "/dev/mapper/crypt-a1b2c3d4",
+                "--luks-uuid",
+                "a1b2c3d4",
+            ],
+        )
+
+        assert result.exit_code == 1
+        mock_write.assert_called_once()

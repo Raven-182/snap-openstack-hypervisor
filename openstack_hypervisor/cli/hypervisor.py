@@ -6,6 +6,7 @@ import json
 import logging
 import sys
 import typing
+from pathlib import Path
 
 import click
 from novaclient import client
@@ -17,6 +18,11 @@ from openstack_hypervisor.cli.common import (
     JSON_INDENT_FORMAT,
     VALUE_FORMAT,
     click_option_format,
+)
+from openstack_hypervisor.encrypted_storage import (
+    mount_instances_path,
+    validate_xfs_filesystem,
+    write_fstab_entry,
 )
 from openstack_hypervisor.hooks import (
     _dpdk_config_is_ready,
@@ -151,6 +157,40 @@ def running_guests(format: str):
     elif format in (JSON_FORMAT, JSON_INDENT_FORMAT):
         indent = 2 if format == JSON_INDENT_FORMAT else None
         click.echo(json.dumps(running_openstack_guests, indent=indent))
+
+
+@hypervisor.command("configure-encrypted-storage")
+@click.option("--mapper-path", required=True, type=click.Path(path_type=Path))
+@click.option("--luks-uuid", required=True, type=str)
+def configure_encrypted_storage(mapper_path: Path, luks_uuid: str) -> None:
+    """Validate and mount the encrypted Nova instances storage.
+
+    The mapper device must contain an XFS filesystem (prepared by the
+    operator). A managed fstab entry is added and the Nova instances path
+    is mounted and verified. The command is idempotent.
+    """
+    snap = Snap()
+    instances_path = snap.paths.common / "lib" / "nova" / "instances"
+
+    if not validate_xfs_filesystem(mapper_path):
+        click.echo(f"{mapper_path} does not contain an XFS filesystem", err=True)
+        sys.exit(1)
+
+    write_fstab_entry(mapper_path, instances_path)
+
+    if not mount_instances_path(instances_path):
+        click.echo(f"Failed to mount {instances_path}", err=True)
+        sys.exit(1)
+
+    click.echo(
+        json.dumps(
+            {
+                "mapper_path": str(mapper_path),
+                "luks_uuid": luks_uuid,
+                "instances_path": str(instances_path),
+            }
+        )
+    )
 
 
 @hypervisor.command("dpdk-ready")
